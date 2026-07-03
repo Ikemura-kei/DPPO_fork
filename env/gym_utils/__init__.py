@@ -106,6 +106,18 @@ def make_async(
         )
         return env
 
+    if env_type == "genesis":
+        # gentle_manip: our batched genesis sim is already vectorized behind a socket
+        # (one rpc/step for all N envs). Return the DPPO VectorEnv bridge directly.
+        from gentle_manip.dppo.genesis_venv import build_genesis_venv
+
+        return build_genesis_venv(
+            num_envs=num_envs, obs_steps=obs_steps, act_steps=act_steps,
+            max_episode_steps=max_episode_steps, normalization_path=normalization_path,
+            obs_keys=kwargs.get("obs_keys"), host=kwargs.get("host", "127.0.0.1"),
+            port=kwargs.get("port", 5570),
+        )
+
     # avoid import error due incompatible gym versions
     from gym import spaces
     from env.gym_utils.async_vector_env import AsyncVectorEnv
