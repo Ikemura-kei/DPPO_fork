@@ -170,14 +170,14 @@ class TrainPPOImgDiffusionAgent(TrainPPODiffusionAgent):
             # Update models
             if not eval_mode:
                 with torch.no_grad():
-                    # apply image randomization
-                    obs_trajs["rgb"] = (
-                        torch.from_numpy(obs_trajs["rgb"]).float().to(self.device)
-                    )
-                    obs_trajs["state"] = (
-                        torch.from_numpy(obs_trajs["state"]).float().to(self.device)
-                    )
-                    if self.augment:
+                    # move all obs modalities to device (generic over obs keys:
+                    # rgb / point_cloud / state — see shape_meta.obs)
+                    for k in obs_trajs:
+                        obs_trajs[k] = (
+                            torch.from_numpy(obs_trajs[k]).float().to(self.device)
+                        )
+                    # apply image randomization (rgb only; no-op for point_cloud)
+                    if self.augment and "rgb" in obs_trajs:
                         rgb = einops.rearrange(
                             obs_trajs["rgb"],
                             "s e t c h w -> (s e t) c h w",

@@ -114,8 +114,8 @@ def make_async(
         return build_genesis_venv(
             num_envs=num_envs, obs_steps=obs_steps, act_steps=act_steps,
             max_episode_steps=max_episode_steps, normalization_path=normalization_path,
-            obs_keys=kwargs.get("obs_keys"), host=kwargs.get("host", "127.0.0.1"),
-            port=kwargs.get("port", 5570),
+            obs_keys=kwargs.get("obs_keys"), pointcloud_key=kwargs.get("pointcloud_key"),
+            host=kwargs.get("host", "127.0.0.1"), port=kwargs.get("port", 5570),
         )
 
     # avoid import error due incompatible gym versions
