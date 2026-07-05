@@ -35,6 +35,17 @@ class TrainPPOImgDiffusionAgent(TrainPPODiffusionAgent):
         # Gradient accumulation to deal with large GPU RAM usage
         self.grad_accumulate = cfg.train.grad_accumulate
 
+        # gentle_manip: fixed-seed periodic eval. When eval_fixed_seed is set, every eval reseeds
+        # (and, if eval_scene_dr, rebuilds the object geometry/material) to the SAME fixed scene,
+        # so the eval return/success/stress are apples-to-apple across training iters (removes the
+        # scene-luck confound: varying Young's / pose). Task success + success-gated stress are
+        # then logged to wandb. After an eval, a fresh training scene is restored (reseed +
+        # rebuild) so training keeps its scene variety. Needs a venv with seed()/randomize_scene()
+        # (the genesis bridge). None -> stock DPPO behaviour.
+        self.eval_fixed_seed = cfg.train.get("eval_fixed_seed", None)
+        self.eval_scene_dr = cfg.train.get("eval_scene_dr", False)
+        self._prev_eval_mode = False
+
     def run(self):
 
         # Start training loop
@@ -57,6 +68,22 @@ class TrainPPOImgDiffusionAgent(TrainPPODiffusionAgent):
             eval_mode = self.itr % self.val_freq == 0 and not self.force_train
             self.model.eval() if eval_mode else self.model.train()
             last_itr_eval = eval_mode
+
+            # gentle_manip fixed-seed eval: reseed (+ optionally rebuild geometry/material) so this
+            # eval faces the SAME scene as every other eval; when the FIRST train iter after an eval
+            # starts, restore a fresh training scene so training keeps variety. Guarded by hasattr
+            # so non-genesis venvs are unaffected.
+            if self.eval_fixed_seed is not None and hasattr(self.venv, "seed"):
+                if eval_mode:
+                    self.venv.seed(int(self.eval_fixed_seed))
+                    if self.eval_scene_dr and hasattr(self.venv, "randomize_scene"):
+                        self.venv.randomize_scene(int(self.eval_fixed_seed))
+                elif self._prev_eval_mode:
+                    train_seed = 2_000_000 + self.itr        # fresh, varied per resumption
+                    self.venv.seed(train_seed)
+                    if self.eval_scene_dr and hasattr(self.venv, "randomize_scene"):
+                        self.venv.randomize_scene(train_seed)
+            self._prev_eval_mode = eval_mode
 
             # Reset env before iteration starts (1) if specified, (2) at eval mode, or (3) right after eval mode
             firsts_trajs = np.zeros((self.n_steps + 1, self.n_envs))
@@ -85,6 +112,10 @@ class TrainPPOImgDiffusionAgent(TrainPPODiffusionAgent):
             )
             terminated_trajs = np.zeros((self.n_steps, self.n_envs))
             reward_trajs = np.zeros((self.n_steps, self.n_envs))
+            # gentle_manip: per-step stress + task-success (from the genesis bridge info), for
+            # success-gated stress reporting during eval.
+            stress_max_trajs = np.full((self.n_steps, self.n_envs), np.nan)
+            success_step_trajs = np.zeros((self.n_steps, self.n_envs))
 
             # Collect a set of trajectories from env
             for step in range(self.n_steps):
@@ -123,6 +154,13 @@ class TrainPPOImgDiffusionAgent(TrainPPODiffusionAgent):
                 reward_trajs[step] = reward_venv
                 terminated_trajs[step] = terminated_venv
                 firsts_trajs[step + 1] = done_venv
+                if eval_mode:                       # gentle_manip: capture stress + task success
+                    sm = info_venv.get("stress_max") if isinstance(info_venv, dict) else None
+                    if sm is not None:
+                        stress_max_trajs[step] = np.asarray(sm, float).reshape(self.n_envs)
+                    su = info_venv.get("success") if isinstance(info_venv, dict) else None
+                    if su is not None:
+                        success_step_trajs[step] = np.asarray(su, float).reshape(self.n_envs)
 
                 # update for next step
                 prev_obs_venv = obs_venv
@@ -166,6 +204,27 @@ class TrainPPOImgDiffusionAgent(TrainPPODiffusionAgent):
                 avg_best_reward = 0
                 success_rate = 0
                 log.info("[WARNING] No episode completed within the iteration!")
+
+            # gentle_manip: eval TASK-success + SUCCESS-GATED peak stress per episode (a failed
+            # episode never grasped -> near-zero stress -> must not count, else "gentle but does
+            # nothing" looks good). Final-step success == task success (held-in-band).
+            eval_task_success_rate = float("nan")
+            eval_stress_peak_succ = float("nan")
+            eval_stress_peak_p95 = float("nan")
+            if eval_mode and len(episodes_start_end) > 0:
+                ep_success, ep_peak = [], []
+                for env_ind, start, end in episodes_start_end:
+                    ep_success.append(bool(success_step_trajs[end, env_ind]))
+                    seg = stress_max_trajs[start : end + 1, env_ind]
+                    seg = seg[~np.isnan(seg)]
+                    ep_peak.append(np.max(seg) if seg.size else np.nan)
+                ep_success = np.array(ep_success, bool)
+                ep_peak = np.array(ep_peak, float)
+                eval_task_success_rate = float(ep_success.mean()) if ep_success.size else float("nan")
+                gated = ep_peak[ep_success & ~np.isnan(ep_peak)]
+                if gated.size:
+                    eval_stress_peak_succ = float(gated.mean())
+                    eval_stress_peak_p95 = float(np.percentile(gated, 95))
 
             # Update models
             if not eval_mode:
@@ -421,21 +480,29 @@ class TrainPPOImgDiffusionAgent(TrainPPODiffusionAgent):
                 if eval_mode:
                     log.info(
                         f"eval: success rate {success_rate:8.4f} | avg episode reward {avg_episode_reward:8.4f} | avg best reward {avg_best_reward:8.4f}"
+                        + (f" | task success {eval_task_success_rate:6.3f} | stress_peak(succ) "
+                           f"{eval_stress_peak_succ:8.0f} (P95 {eval_stress_peak_p95:8.0f})"
+                           if not math.isnan(eval_task_success_rate) else "")
                     )
                     if self.use_wandb:
-                        wandb.log(
-                            {
-                                "success rate - eval": success_rate,
-                                "avg episode reward - eval": avg_episode_reward,
-                                "avg best reward - eval": avg_best_reward,
-                                "num episode - eval": num_episode_finished,
-                            },
-                            step=self.itr,
-                            commit=False,
-                        )
+                        eval_log = {
+                            "success rate - eval": success_rate,
+                            "avg episode reward - eval": avg_episode_reward,
+                            "avg best reward - eval": avg_best_reward,
+                            "num episode - eval": num_episode_finished,
+                        }
+                        # gentle_manip: task-success + success-gated stress (NaN -> skip)
+                        if not math.isnan(eval_task_success_rate):
+                            eval_log["task success rate - eval"] = eval_task_success_rate
+                        if not math.isnan(eval_stress_peak_succ):
+                            eval_log["stress peak mean (success) - eval"] = eval_stress_peak_succ
+                            eval_log["stress peak p95 (success) - eval"] = eval_stress_peak_p95
+                        wandb.log(eval_log, step=self.itr, commit=False)
                     run_results[-1]["eval_success_rate"] = success_rate
                     run_results[-1]["eval_episode_reward"] = avg_episode_reward
                     run_results[-1]["eval_best_reward"] = avg_best_reward
+                    run_results[-1]["eval_task_success_rate"] = eval_task_success_rate
+                    run_results[-1]["eval_stress_peak_success"] = eval_stress_peak_succ
                 else:
                     log.info(
                         f"{self.itr}: step {cnt_train_step:8d} | loss {loss:8.4f} | pg loss {pg_loss:8.4f} | value loss {v_loss:8.4f} | bc loss {bc_loss:8.4f} | reward {avg_episode_reward:8.4f} | eta {eta:8.4f} | t:{time:8.4f}"
