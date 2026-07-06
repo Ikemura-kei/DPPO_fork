@@ -44,7 +44,40 @@ class TrainPPOImgDiffusionAgent(TrainPPODiffusionAgent):
         # (the genesis bridge). None -> stock DPPO behaviour.
         self.eval_fixed_seed = cfg.train.get("eval_fixed_seed", None)
         self.eval_scene_dr = cfg.train.get("eval_scene_dr", False)
+        # gentle_manip: if >0, the periodic eval runs eval_n_batches x n_envs episodes through the
+        # SHARED harness (fixed reproducible scenes, per-EPISODE video, success-gated v2 stress) —
+        # a low-variance in-training eval instead of the single 12-episode rollout.
+        self.eval_n_batches = int(cfg.train.get("eval_n_batches", 0))
         self._prev_eval_mode = False
+
+    def _gm_periodic_eval(self):
+        """Multi-batch fixed-seed periodic eval via gentle_manip.evaluation.run_eval:
+        eval_n_batches x n_envs episodes on scenes that are DETERMINISTIC in eval_fixed_seed (so
+        the curve is apples-to-apple across iters), one video PER EPISODE, success-gated v2 stress
+        + task success -> wandb/stdout. Reuses the canonical eval protocol at a smaller scale."""
+        from pathlib import Path
+        from gentle_manip.evaluation import EvalSpec, run_eval
+        from gentle_manip.dppo.eval_agent import _DiffusionPolicy
+        spec = EvalSpec(n_episodes=self.eval_n_batches * self.n_envs, num_envs=self.n_envs,
+                        seed=int(self.eval_fixed_seed), max_policy_steps=self.n_steps,
+                        scene_group_size=self.eval_n_batches if self.eval_scene_dr else 0)
+        policy = _DiffusionPolicy(self.model, list(self.obs_dims.keys()), self.device, self.act_steps)
+        out = Path(self.logdir) / "periodic_eval" / f"itr-{self.itr}"
+        summ = run_eval(self.venv, policy, spec, out, experiment_name=None,
+                        checkpoint=f"itr-{self.itr}", record_batches=None)  # all eps -> per-ep video
+        self.model.train()                                   # run_eval left model in eval
+        ts = summ.get("success_rate", float("nan"))
+        sp, sp95 = summ.get("stress_max_tmax_mean"), summ.get("stress_max_tmax_p95")
+        log.info(f"eval[{self.itr}]: task_success {ts:.3f} over {summ.get('n_episodes')} eps"
+                 + (f" | peak(succ) {sp:.0f} (P95 {sp95:.0f})" if sp is not None else ""))
+        if self.use_wandb:
+            d = {"task success rate - eval": ts,
+                 "avg episode reward - eval": summ.get("mean_episode_reward")}
+            if sp is not None:
+                d["stress peak mean (success) - eval"] = sp
+                d["stress peak p95 (success) - eval"] = sp95
+            wandb.log(d, step=self.itr, commit=False)
+        return summ
 
     def run(self):
 
@@ -73,17 +106,34 @@ class TrainPPOImgDiffusionAgent(TrainPPODiffusionAgent):
             # eval faces the SAME scene as every other eval; when the FIRST train iter after an eval
             # starts, restore a fresh training scene so training keeps variety. Guarded by hasattr
             # so non-genesis venvs are unaffected.
+            do_gm_eval = eval_mode and self.eval_n_batches > 0 and self.eval_fixed_seed is not None
             if self.eval_fixed_seed is not None and hasattr(self.venv, "seed"):
-                if eval_mode:
+                if eval_mode and not do_gm_eval:             # single-batch legacy eval: fix its scene
                     self.venv.seed(int(self.eval_fixed_seed))
                     if self.eval_scene_dr and hasattr(self.venv, "randomize_scene"):
                         self.venv.randomize_scene(int(self.eval_fixed_seed))
-                elif self._prev_eval_mode:
-                    train_seed = 2_000_000 + self.itr        # fresh, varied per resumption
+                elif self._prev_eval_mode:                   # restore a training scene after ANY eval
+                    train_seed = 2_000_000 + self.itr
                     self.venv.seed(train_seed)
                     if self.eval_scene_dr and hasattr(self.venv, "randomize_scene"):
                         self.venv.randomize_scene(train_seed)
             self._prev_eval_mode = eval_mode
+
+            # gentle_manip: multi-batch harness eval REPLACES the single 12-ep rollout (lower
+            # variance + per-episode video). Skip the train rollout/update; mirror the per-iter
+            # tail (lr schedulers / ema / checkpoint / itr) so bookkeeping is unchanged.
+            if do_gm_eval:
+                self._gm_periodic_eval()
+                if self.itr >= self.n_critic_warmup_itr:
+                    self.actor_lr_scheduler.step()
+                    if self.learn_eta:
+                        self.eta_lr_scheduler.step()
+                self.critic_lr_scheduler.step()
+                self.model.step()
+                if self.itr % self.save_model_freq == 0 or self.itr == self.n_train_itr - 1:
+                    self.save_model()
+                self.itr += 1
+                continue
 
             # Reset env before iteration starts (1) if specified, (2) at eval mode, or (3) right after eval mode
             firsts_trajs = np.zeros((self.n_steps + 1, self.n_envs))
