@@ -133,6 +133,17 @@ class TrainPPOImgDiffusionAgent(TrainPPODiffusionAgent):
                 if self.itr % self.save_model_freq == 0 or self.itr == self.n_train_itr - 1:
                     self.save_model()
                 self.itr += 1
+                # run_eval reset the venv to eval scenes; restore a fresh TRAINING scene and PRIME
+                # the rollout state (prev_obs_venv/done_venv) for the next train iter — we skipped
+                # the normal reset, so the loop-local prev_obs_venv would otherwise be unbound.
+                if self.eval_fixed_seed is not None and hasattr(self.venv, "seed"):
+                    _s = 2_000_000 + self.itr
+                    self.venv.seed(_s)
+                    if self.eval_scene_dr and hasattr(self.venv, "randomize_scene"):
+                        self.venv.randomize_scene(_s)
+                prev_obs_venv = self.reset_env_all(options_venv=[{} for _ in range(self.n_envs)])
+                done_venv = np.ones((1, self.n_envs))   # next train iter treats step 0 as fresh
+                self._prev_eval_mode = False             # training scene already restored here
                 continue
 
             # Reset env before iteration starts (1) if specified, (2) at eval mode, or (3) right after eval mode
