@@ -63,8 +63,18 @@ class TrainPPOImgDiffusionAgent(TrainPPODiffusionAgent):
                         scene_group_size=self.eval_n_batches if self.eval_scene_dr else 0)
         policy = _DiffusionPolicy(self.model, list(self.obs_dims.keys()), self.device, self.act_steps)
         out = Path(self.logdir) / "periodic_eval" / f"itr-{self.itr}"
-        summ = run_eval(self.venv, policy, spec, out, experiment_name=None,
-                        checkpoint=f"itr-{self.itr}", record_batches=None)  # all eps -> per-ep video
+        # Freeze the training server's periodic auto scene-DR so it can't fire mid-eval: the
+        # harness owns the deterministic per-group rebuild (scene_group_size), and a stray
+        # every-N-resets relaunch would rebuild geometry + advance the RNG, breaking the eval's
+        # apples-to-apple determinism. Restored in finally. No-op when scene_dr_every=0.
+        if hasattr(self.venv, "set_auto_scene_dr"):
+            self.venv.set_auto_scene_dr(False)
+        try:
+            summ = run_eval(self.venv, policy, spec, out, experiment_name=None,
+                            checkpoint=f"itr-{self.itr}", record_batches=None)  # all eps -> per-ep video
+        finally:
+            if hasattr(self.venv, "set_auto_scene_dr"):
+                self.venv.set_auto_scene_dr(True)
         self.model.train()                                   # run_eval left model in eval
         ts = summ.get("success_rate", float("nan"))
         sp, sp95 = summ.get("stress_max_tmax_mean"), summ.get("stress_max_tmax_p95")
