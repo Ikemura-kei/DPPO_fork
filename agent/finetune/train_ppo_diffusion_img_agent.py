@@ -156,9 +156,11 @@ class TrainPPOImgDiffusionAgent(TrainPPODiffusionAgent):
                 self._prev_eval_mode = False             # training scene already restored here
                 continue
 
-            # Reset env before iteration starts (1) if specified, (2) at eval mode, or (3) right after eval mode
+            # Reset env before iteration starts (1) if specified, (2) at eval mode, (3) right after
+            # eval mode, or (4) on the very first iteration — with force_train=true itr 0 is NOT an
+            # eval iter, so without this prev_obs_venv/done_venv would be unbound at first use.
             firsts_trajs = np.zeros((self.n_steps + 1, self.n_envs))
-            if self.reset_at_iteration or eval_mode or last_itr_eval:
+            if self.reset_at_iteration or eval_mode or last_itr_eval or self.itr == 0:
                 prev_obs_venv = self.reset_env_all(options_venv=options_venv)
                 firsts_trajs[0] = 1
             else:
