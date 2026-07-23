@@ -6,6 +6,7 @@ Pre-training diffusion policy
 import logging
 import wandb
 import numpy as np
+import torch
 
 log = logging.getLogger(__name__)
 from util.timer import Timer
@@ -48,11 +49,17 @@ class TrainDiffusionAgent(PreTrainAgent):
             loss_val_epoch = []
             if self.dataloader_val is not None and self.epoch % self.val_freq == 0:
                 self.model.eval()
-                for batch_val in self.dataloader_val:
-                    if self.dataset_val.device == "cpu":
-                        batch_val = batch_to_device(batch_val)
-                    loss_val, infos_val = self.model.loss(*batch_val)
-                    loss_val_epoch.append(loss_val.item())
+                # no_grad: this pass is forward-only, so building the autograd graph is pure
+                # waste (the val clouds are ~0.3 GB on GPU already).
+                # NOTE: upstream unpacked `loss_val, infos_val = self.model.loss(...)`, but
+                # loss() returns a bare scalar (see the train call above) — that line raised
+                # "iteration over a 0-d tensor" the first time validation was ever run.
+                with torch.no_grad():
+                    for batch_val in self.dataloader_val:
+                        if self.dataset_val.device == "cpu":
+                            batch_val = batch_to_device(batch_val)
+                        loss_val = self.model.loss(*batch_val)
+                        loss_val_epoch.append(loss_val.item())
                 self.model.train()
             loss_val = np.mean(loss_val_epoch) if len(loss_val_epoch) > 0 else None
 
@@ -65,8 +72,12 @@ class TrainDiffusionAgent(PreTrainAgent):
 
             # log loss
             if self.epoch % self.log_freq == 0:
+                # val loss goes in the LOG LINE too, not just wandb — the slurm log is the
+                # primary monitoring surface on the cluster, and the train/val gap is the
+                # signal for spotting overfitting without waiting on a sim eval.
+                val_str = f" | val loss {loss_val:8.4f}" if loss_val is not None else ""
                 log.info(
-                    f"{self.epoch}: train loss {loss_train:8.4f} | t:{timer():8.4f}"
+                    f"{self.epoch}: train loss {loss_train:8.4f}{val_str} | t:{timer():8.4f}"
                 )
                 if self.use_wandb:
                     if loss_val is not None:

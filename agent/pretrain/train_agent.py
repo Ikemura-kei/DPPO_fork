@@ -104,7 +104,23 @@ class PreTrainAgent:
             pin_memory=True if self.dataset_train.device == "cpu" else False,
         )
         self.dataloader_val = None
-        if "train_split" in cfg.train and cfg.train.train_split < 1:
+        # Held-out VALIDATION SET from its OWN file (cfg.val_dataset -> val.npz), which
+        # convert_demos splits off BY TRAJECTORY. Preferred over the legacy train_split path
+        # below: that one samples val windows out of self.indices, i.e. from the SAME
+        # trajectories the model trains on, so its "val" loss is ~iid with train and cannot
+        # reveal overfitting. (It is also broken for these datasets — set_train_val_split
+        # returns integer POSITIONS while __getitem__ unpacks (start, num_before_start)
+        # tuples — and upstream documents it as "Not doing validation right now".)
+        if cfg.get("val_dataset", None) is not None:
+            self.dataset_val = hydra.utils.instantiate(cfg.val_dataset)
+            self.dataloader_val = torch.utils.data.DataLoader(
+                self.dataset_val,
+                batch_size=self.batch_size,
+                num_workers=4 if self.dataset_val.device == "cpu" else 0,
+                shuffle=False,          # fixed order: val loss comparable epoch to epoch
+                pin_memory=True if self.dataset_val.device == "cpu" else False,
+            )
+        elif "train_split" in cfg.train and cfg.train.train_split < 1:
             val_indices = self.dataset_train.set_train_val_split(cfg.train.train_split)
             self.dataset_val = deepcopy(self.dataset_train)
             self.dataset_val.set_indices(val_indices)
