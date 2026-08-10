@@ -21,9 +21,29 @@ class TrainDiffusionAgent(PreTrainAgent):
     def run(self):
 
         timer = Timer()
-        self.epoch = 1
+        # gentle_manip patch: optional resume from an arbitrary checkpoint path (the
+        # stock run() always started at epoch 1, even though save_model()/load()
+        # already round-trip model+ema+epoch -- nothing wired that up to actually
+        # continue a run). Pass `resume_from=<run_dir>/checkpoint/state_<N>.pt` on the
+        # hydra CLI to pick up right after that checkpoint. KNOWN LIMITATION: optimizer
+        # and lr_scheduler internal state are NOT restored (not saved by save_model()
+        # either), so a resumed run's Adam moments/cosine-schedule phase restart from
+        # scratch -- acceptable for BC pretraining (a few epochs of mild LR mismatch,
+        # not a correctness issue), not a full production-grade resume.
+        resume_from = self.cfg.get("resume_from", None)
+        if resume_from:
+            log.info(f"Resuming from checkpoint: {resume_from}")
+            data = torch.load(resume_from, map_location=next(self.model.parameters()).device,
+                              weights_only=True)
+            self.model.load_state_dict(data["model"])
+            self.ema_model.load_state_dict(data["ema"])
+            self.epoch = data["epoch"] + 1
+            log.info(f"Resumed at epoch {self.epoch} (target n_epochs={self.n_epochs})")
+        else:
+            self.epoch = 1
+        n_remaining = max(0, self.n_epochs - self.epoch + 1)
         cnt_batch = 0
-        for _ in range(self.n_epochs):
+        for _ in range(n_remaining):
 
             # train
             loss_train_epoch = []

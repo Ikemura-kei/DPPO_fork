@@ -60,6 +60,7 @@ class PreTrainAgent:
 
     def __init__(self, cfg):
         super().__init__()
+        self.cfg = cfg  # kept for run()'s optional resume_from lookup (gentle_manip patch)
         self.seed = cfg.get("seed", 42)
         random.seed(self.seed)
         np.random.seed(self.seed)
