@@ -116,6 +116,8 @@ def make_async(
             max_episode_steps=max_episode_steps, normalization_path=normalization_path,
             obs_keys=kwargs.get("obs_keys"), pointcloud_key=kwargs.get("pointcloud_key"),
             host=kwargs.get("host", "127.0.0.1"), port=kwargs.get("port", 5570),
+            category=kwargs.get("category"),
+            category_embed_source=kwargs.get("category_embed_source", "registry"),
         )
 
     # avoid import error due incompatible gym versions
