@@ -45,13 +45,23 @@ class DiffusionEval(DiffusionModel):
             assert ft_denoising_steps == 0, (
                 "If no base policy weights are found, ft_denoising_steps must be 0"
             )
+            # Prefer the EMA-averaged weights over the raw ones when present (matches
+            # DiffusionModel's own network_path loader, model/diffusion/diffusion.py) --
+            # a pure BC-pretrain checkpoint (train_agent.py's save_model) stores both
+            # "model" (raw, noisy step-to-step) and "ema" (decay=0.995, the stable weights
+            # BC pretraining is meant to be evaluated with). A finetune checkpoint has no
+            # "ema" key, so this only changes behavior for BC-only (ft_denoising_steps=0) evals.
+            src = checkpoint.get("ema", checkpoint["model"])
             base_weights = {
-                key.split("network.")[1]: checkpoint["model"][key]
-                for key in checkpoint["model"]
+                key.split("network.")[1]: src[key]
+                for key in src
                 if "network." in key
             }
             use_ft = False
-            logging.info("Actor weights not found. Using pre-trained weights!")
+            logging.info(
+                "Actor weights not found. Using pre-trained weights (%s)!",
+                "EMA" if "ema" in checkpoint else "raw",
+            )
             self.actor.load_state_dict(base_weights, strict=True)
         logging.info("Loaded base policy weights from %s", network_path)
 
