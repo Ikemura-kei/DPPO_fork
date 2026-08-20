@@ -16,6 +16,21 @@ from model.diffusion.diffusion import DiffusionModel
 from model.diffusion.sampling import extract
 
 
+def _load_state_dict_relaxed(module, state_dict):
+    """load_state_dict(strict=False), but still fail loudly on a genuinely MISSING key.
+
+    strict=False alone would also silently swallow missing keys, masking a real checkpoint/
+    architecture mismatch. We only want to tolerate EXTRA keys (e.g. aux-objective head
+    weights -- pos_head/contact_head -- present in a checkpoint trained with
+    AuxDiffusionModel but absent from the plain eval network, since aux heads are
+    training-only and unused at inference). Any missing key is still a hard error.
+    """
+    result = module.load_state_dict(state_dict, strict=False)
+    if result.missing_keys:
+        raise RuntimeError(f"Missing key(s) in state_dict: {result.missing_keys}")
+    return result
+
+
 class DiffusionEval(DiffusionModel):
     def __init__(
         self,
@@ -40,7 +55,7 @@ class DiffusionEval(DiffusionModel):
                 if "actor." in key
             }
             use_ft = True
-            self.actor.load_state_dict(base_weights, strict=True)
+            _load_state_dict_relaxed(self.actor, base_weights)
         except Exception:
             assert ft_denoising_steps == 0, (
                 "If no base policy weights are found, ft_denoising_steps must be 0"
@@ -62,7 +77,7 @@ class DiffusionEval(DiffusionModel):
                 "Actor weights not found. Using pre-trained weights (%s)!",
                 "EMA" if "ema" in checkpoint else "raw",
             )
-            self.actor.load_state_dict(base_weights, strict=True)
+            _load_state_dict_relaxed(self.actor, base_weights)
         logging.info("Loaded base policy weights from %s", network_path)
 
         # Always set up fine-tuned model
@@ -73,7 +88,7 @@ class DiffusionEval(DiffusionModel):
                 for key in checkpoint["model"]
                 if "actor_ft." in key
             }
-            self.actor_ft.load_state_dict(ft_weights, strict=True)
+            _load_state_dict_relaxed(self.actor_ft, ft_weights)
             logging.info("Loaded fine-tuned policy weights from %s", network_path)
 
     # override
