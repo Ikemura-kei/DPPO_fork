@@ -84,9 +84,14 @@ class TrainDiffusionAgent(PreTrainAgent):
                         wandb.log(
                             {"loss - val": loss_val}, step=self.epoch, commit=False
                         )
+                    # Auxiliary-objective loss components (AuxDiffusionModel stashes the last
+                    # step's breakdown in _aux_log; empty for the plain model / no-aux baseline).
+                    aux_log = {f"aux - {k}": v
+                               for k, v in getattr(self.model, "_aux_log", {}).items()}
                     wandb.log(
                         {
                             "loss - train": loss_train,
+                            **aux_log,
                         },
                         step=self.epoch,
                         commit=True,
