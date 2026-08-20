@@ -62,7 +62,10 @@ class DiffusionEval(DiffusionModel):
                 "Actor weights not found. Using pre-trained weights (%s)!",
                 "EMA" if "ema" in checkpoint else "raw",
             )
-            self.actor.load_state_dict(base_weights, strict=True)
+            # strict=False: a checkpoint trained with auxiliary heads (contact/object-pos) carries
+            # extra 'contact_head.*'/'pos_head.*' keys that the inference network doesn't have; they
+            # are training-only, so ignore them (all inference keys are still present).
+            self.actor.load_state_dict(base_weights, strict=False)
         logging.info("Loaded base policy weights from %s", network_path)
 
         # Always set up fine-tuned model
