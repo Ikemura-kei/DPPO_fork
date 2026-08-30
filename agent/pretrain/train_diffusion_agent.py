@@ -5,12 +5,22 @@ Pre-training diffusion policy
 
 import logging
 import wandb
+import os
 import numpy as np
 import torch
 
 log = logging.getLogger(__name__)
 from util.timer import Timer
 from agent.pretrain.train_agent import PreTrainAgent, batch_to_device
+
+
+# GAP knobs (default OFF -> this file behaves exactly as before)
+_GAP_LAMBDA = float(os.environ.get("GM_GAP_LAMBDA", "0") or 0)
+_GAP_START = int(os.environ.get("GM_GAP_START", "0") or 0)
+_GAP_END = int(os.environ.get("GM_GAP_END", "50") or 50)
+if _GAP_LAMBDA > 0:
+    log.info("GAP active: lambda=%.3f, modulation epochs %d-%d, params matching 'proprio_encoder'",
+             _GAP_LAMBDA, _GAP_START, _GAP_END)
 
 
 class TrainDiffusionAgent(PreTrainAgent):
@@ -35,6 +45,26 @@ class TrainDiffusionAgent(PreTrainAgent):
                 loss_train = self.model.loss(*batch_train)
                 loss_train.backward()
                 loss_train_epoch.append(loss_train.item())
+
+                # ---- GAP: Gradient Adjustment with Phase-guidance -----------------------
+                # Faithful port of third_party/GAP/gap/gap.py (Lu et al., arXiv 2602.12032).
+                # Their code, verbatim in structure:
+                #     phase_p = torch.max(batch['phase']).item()   # per-batch SCALAR
+                #     coeff_p = 1 - lambda * phase_p               # NOT lambda*(1-rho)
+                #     if modulation_starts <= epoch <= modulation_ends:
+                #         for name, parms in policy.encoder.named_parameters():
+                #             if 'pro' in name: parms.grad *= coeff_p
+                # Their proven settings: lambda 0.3, window epochs 0-50.
+                # rho here is our KNOWN grasp window (scripted demonstrator) instead of their
+                # CPD+LSTM estimate — the only intentional deviation.
+                if _GAP_LAMBDA > 0.0 and _GAP_START <= self.epoch <= _GAP_END:
+                    _cond = batch_train.conditions
+                    _ph = _cond.get("in_grasp_window") if isinstance(_cond, dict) else None
+                    if _ph is not None:
+                        _coeff = 1.0 - _GAP_LAMBDA * float(_ph.max().item())
+                        for _n, _p in self.model.named_parameters():
+                            if "proprio_encoder" in _n and _p.grad is not None:
+                                _p.grad *= _coeff
 
                 self.optimizer.step()
                 self.optimizer.zero_grad()
