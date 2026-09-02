@@ -105,9 +105,13 @@ class TrainDiffusionAgent(PreTrainAgent):
                 # val loss goes in the LOG LINE too, not just wandb — the slurm log is the
                 # primary monitoring surface on the cluster, and the train/val gap is the
                 # signal for spotting overfitting without waiting on a sim eval.
-                val_str = f" | val loss {loss_val:8.4f}" if loss_val is not None else ""
+                # 8 decimals, not 4 (2026-09-02): at 4dp the converged val loss can only take a
+                # handful of values (0.0005/0.0006/...), so a 1-step change reads as "+20%" and
+                # val-min checkpoint selection ends up selecting on ROUNDING. Full precision is
+                # needed to tell "still improving" from "flat within noise".
+                val_str = f" | val loss {loss_val:.8f}" if loss_val is not None else ""
                 log.info(
-                    f"{self.epoch}: train loss {loss_train:8.4f}{val_str} | t:{timer():8.4f}"
+                    f"{self.epoch}: train loss {loss_train:.8f}{val_str} | t:{timer():8.4f}"
                 )
                 if self.use_wandb:
                     if loss_val is not None:
